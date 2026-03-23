@@ -4,17 +4,18 @@ import time
 import json
 import asyncio
 import subprocess
+import traceback
 from collections import deque
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.enums import ChatType, ParseMode
+from pyrogram.enums import ChatType
 
 # ================= CONFIGURATION (Railway Variables) =================
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DEST_CHANNEL = int(os.getenv("DEST_CHANNEL", 0)) # Value from Railway
+DEST_CHANNEL = int(os.getenv("DEST_CHANNEL", 0))
 
 # 🔐 Authority System Configuration
 OWNER_ID = 5344078567                    
@@ -34,53 +35,43 @@ in_queue = set()
 
 # ================= UTILS & PROGRESS BARS =================
 
-async def is_valid_command(client, message):
-    if message.chat.type == ChatType.PRIVATE:
-        return True
-    if message.text and "@" in message.text:
-        return message.text.lower().endswith(client.username)
-    return True
-
-def is_authorized(message: Message) -> bool:
-    if not message.from_user: return False
-    user_id = message.from_user.id    
-    chat_id = message.chat.id    
-    if message.text and message.text.lower().startswith("/start"): return True    
-    if user_id == OWNER_ID: return True    
-    if message.chat.type == ChatType.PRIVATE: return user_id in ALLOWED_USERS    
-    return chat_id in ALLOWED_GROUPS
-
 def progress_bar(percent):
     total_blocks = 12
     filled = int((percent / 100) * total_blocks)
     return "█" * filled + "░" * (total_blocks - filled)
 
-# --- MODIFIED & ROBUST get_duration FUNCTION ---
+# ================= FIXED & ROBUST get_duration FUNCTION =================
 def get_duration(file):
-    """Safely gets the duration of a video file, handling potential errors."""
+    """Safely gets the duration of a video file, handling 'N/A' and errors."""
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", file],
-            capture_output=True, text=True, check=True
+            ["ffprobe", "-v", "quiet", "-print_format", "json", 
+             "-show_format", "-show_streams", file],
+            capture_output=True, text=True, check=True, timeout=30
         )
         data = json.loads(result.stdout)
         
-        # Check if 'duration' key exists and is not 'N/A'
+        # Try from format
         duration_str = data.get("format", {}).get("duration")
+        
+        # If not, try from video stream
+        if not duration_str or duration_str == 'N/A':
+            for stream in data.get("streams", []):
+                if stream.get("codec_type") == "video":
+                    duration_str = stream.get("duration")
+                    break
+        
         if duration_str and duration_str != 'N/A':
             return float(duration_str)
         else:
-            # Return 0 if duration is not found, which will prevent crashes
             print(f"Warning: Duration not found or was 'N/A' for file {file}. Returning 0.0.")
             return 0.0
-    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError, ValueError) as e:
-        # Log the error and return 0 to avoid crashing the bot
+    except subprocess.TimeoutExpired:
+        print(f"ffprobe timeout for {file}")
+        return 0.0
+    except Exception as e:
         print(f"Error getting duration for {file}: {e}. Returning 0.0.")
         return 0.0
-
-def format_eta(seconds):
-    if seconds is None or seconds <= 0: return "00:00:00"
-    return time.strftime("%H:%M:%S", time.gmtime(seconds))
 
 # ================= DOWNLOADER =================
 
@@ -158,7 +149,6 @@ async def file_handler(client, message: Message):
 
     if user_id not in users: return
     
-    # Check if subtitle
     if message.document and message.document.file_name.endswith((".srt", ".ass", ".ssa", ".vtt")):
         if "video" not in users[user_id]:
             await message.reply("❌ First send or reply to a video.")
@@ -166,25 +156,30 @@ async def file_handler(client, message: Message):
             
         users[user_id]["subtitle"] = {"file_id": message.document.file_id, "file_name": message.document.file_name}
         
-        # Add to Queue
         task_info = {'user_id': user_id, 'message': message, 'video_info': users[user_id]["video"], 'subtitle_info': users[user_id]["subtitle"]}
         task_queue.append(task_info)
         in_queue.add(user_id)
         await message.reply(f"✅ Task added to queue. Position: {len(task_queue)}")
         del users[user_id]
     else:
-        # If it's a video, store it as the starting point
         media = message.video or message.document
         users[user_id] = {"video": {"file_id": media.file_id, "file_name": getattr(media, 'file_name', "video.mp4")}}
         await message.reply("📄 Now send subtitle (.srt / .ass / .ssa / .vtt)")
+
+def is_authorized(message: Message) -> bool:
+    if not message.from_user: return False
+    user_id = message.from_user.id    
+    chat_id = message.chat.id    
+    if message.text and message.text.lower().startswith("/start"): return True    
+    if user_id == OWNER_ID: return True    
+    if message.chat.type == ChatType.PRIVATE: return user_id in ALLOWED_USERS    
+    return chat_id in ALLOWED_GROUPS
 
 # ================= ENCODING & THUMBNAIL =================
 
 async def generate_thumbnail(video_path, user_id):
     try:
         duration = get_duration(video_path)
-        # If duration is 0, we can't get a thumbnail from the middle.
-        # Let's try getting it from the first second instead.
         timestamp = duration / 2 if duration > 1 else 1
         thumb_path = f"thumb_{user_id}.jpg"
         cmd = ["ffmpeg", "-i", video_path, "-ss", str(timestamp), "-vframes", "1", "-q:v", "2", "-y", thumb_path]
@@ -201,7 +196,6 @@ async def encode_video(user_id, video_path, sub_path, output_path, duration, msg
     active_process[user_id] = process
     last_update_time = time.time()
 
-    # If duration is 0, we can't show progress.
     if duration <= 0:
         await msg.edit("🔥 Encoding...\n(Cannot determine video length, progress bar unavailable)")
         await process.wait()
@@ -212,12 +206,15 @@ async def encode_video(user_id, video_path, sub_path, output_path, duration, msg
         if not line: break
         line = line.decode(errors="ignore").strip()
         if line.startswith("out_time_ms="):
-            current_time = int(line.split("=")[1]) / 1000000
-            percent = min(int((current_time / duration) * 100), 100)
-            if time.time() - last_update_time >= 7:
-                bar = progress_bar(percent)
-                await msg.edit(f"<b>ᴇɴᴄᴏᴅɪɴɢ...</b>\n\n[{bar}] {percent}%")
-                last_update_time = time.time()
+            try:
+                current_time = int(line.split("=")[1]) / 1000000
+                percent = min(int((current_time / duration) * 100), 100) if duration > 0 else 0
+                if time.time() - last_update_time >= 7:
+                    bar = progress_bar(percent)
+                    await msg.edit(f"<b>ᴇɴᴄᴏᴅɪɴɢ...</b>\n\n[{bar}] {percent}%")
+                    last_update_time = time.time()
+            except:
+                continue
     await process.wait()
     return os.path.exists(output_path)
 
@@ -269,6 +266,8 @@ async def process_encoding(client, message, user_id, video_info, subtitle_info):
 
     except Exception as e:
         await status.edit(f"❌ An unexpected error occurred: {str(e)}")
+        print("=== FULL ERROR ===")
+        traceback.print_exc()
     finally:
         # Cleanup all created files
         if v_path and os.path.exists(v_path): os.remove(v_path)
@@ -297,5 +296,4 @@ async def main():
     await idle()
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
+    asyncio.run(main())
