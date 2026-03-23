@@ -55,10 +55,28 @@ def progress_bar(percent):
     filled = int((percent / 100) * total_blocks)
     return "█" * filled + "░" * (total_blocks - filled)
 
+# --- MODIFIED & ROBUST get_duration FUNCTION ---
 def get_duration(file):
-    result = subprocess.run(["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", file], capture_output=True, text=True)
-    data = json.loads(result.stdout)
-    return float(data["format"]["duration"])
+    """Safely gets the duration of a video file, handling potential errors."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", file],
+            capture_output=True, text=True, check=True
+        )
+        data = json.loads(result.stdout)
+        
+        # Check if 'duration' key exists and is not 'N/A'
+        duration_str = data.get("format", {}).get("duration")
+        if duration_str and duration_str != 'N/A':
+            return float(duration_str)
+        else:
+            # Return 0 if duration is not found, which will prevent crashes
+            print(f"Warning: Duration not found or was 'N/A' for file {file}. Returning 0.0.")
+            return 0.0
+    except (subprocess.CalledProcessError, json.JSONDecodeError, KeyError, ValueError) as e:
+        # Log the error and return 0 to avoid crashing the bot
+        print(f"Error getting duration for {file}: {e}. Returning 0.0.")
+        return 0.0
 
 def format_eta(seconds):
     if seconds is None or seconds <= 0: return "00:00:00"
@@ -165,18 +183,29 @@ async def file_handler(client, message: Message):
 async def generate_thumbnail(video_path, user_id):
     try:
         duration = get_duration(video_path)
+        # If duration is 0, we can't get a thumbnail from the middle.
+        # Let's try getting it from the first second instead.
+        timestamp = duration / 2 if duration > 1 else 1
         thumb_path = f"thumb_{user_id}.jpg"
-        cmd = ["ffmpeg", "-i", video_path, "-ss", str(duration/2), "-vframes", "1", "-q:v", "2", "-y", thumb_path]
+        cmd = ["ffmpeg", "-i", video_path, "-ss", str(timestamp), "-vframes", "1", "-q:v", "2", "-y", thumb_path]
         process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         await process.wait()
         return thumb_path if os.path.exists(thumb_path) else None
-    except: return None
+    except Exception as e: 
+        print(f"Error generating thumbnail: {e}")
+        return None
 
 async def encode_video(user_id, video_path, sub_path, output_path, duration, msg):
     cmd = ["ffmpeg", "-i", video_path, "-vf", f"subtitles='{sub_path}'", "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-c:a", "copy", "-progress", "pipe:1", "-nostats", output_path]
     process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
     active_process[user_id] = process
     last_update_time = time.time()
+
+    # If duration is 0, we can't show progress.
+    if duration <= 0:
+        await msg.edit("🔥 Encoding...\n(Cannot determine video length, progress bar unavailable)")
+        await process.wait()
+        return os.path.exists(output_path)
 
     while True:
         line = await process.stdout.readline()
@@ -216,10 +245,18 @@ async def upload_file(client, message, file_path, thumb_path=None):
 
 async def process_encoding(client, message, user_id, video_info, subtitle_info):
     status = await message.reply("📥 Starting Task...")
+    v_path = None
+    s_path = None
+    output = None
+    thumb = None
     try:
         v_path = await download_with_progress(client, video_info["file_id"], video_info["file_name"], status, "Video")
         s_path = await download_with_progress(client, subtitle_info["file_id"], subtitle_info["file_name"], status, "Subtitle")
         
+        if not v_path or not s_path:
+            await status.edit("❌ Download failed. Please try again.")
+            return
+
         output = f"Hardsub_{video_info['file_name']}"
         duration = get_duration(v_path)
         
@@ -227,12 +264,17 @@ async def process_encoding(client, message, user_id, video_info, subtitle_info):
         if await encode_video(user_id, v_path, s_path, output, duration, status):
             thumb = await generate_thumbnail(output, user_id)
             await upload_file(client, message, output, thumb)
-            if thumb: os.remove(thumb)
-        
-        if os.path.exists(v_path): os.remove(v_path)
-        if os.path.exists(s_path): os.remove(s_path)
+        else:
+            await status.edit("❌ Encoding failed.")
+
     except Exception as e:
-        await status.edit(f"❌ Error: {str(e)}")
+        await status.edit(f"❌ An unexpected error occurred: {str(e)}")
+    finally:
+        # Cleanup all created files
+        if v_path and os.path.exists(v_path): os.remove(v_path)
+        if s_path and os.path.exists(s_path): os.remove(s_path)
+        if output and os.path.exists(output): os.remove(output)
+        if thumb and os.path.exists(thumb): os.remove(thumb)
 
 async def queue_worker():
     global current_user, current_task
@@ -250,8 +292,10 @@ async def queue_worker():
 
 async def main():
     await app.start()
+    print("Bot Started!")
     asyncio.create_task(queue_worker())
     await idle()
 
 if __name__ == "__main__":
-    app.run(main())
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
