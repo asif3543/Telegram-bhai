@@ -14,11 +14,11 @@ from pyrogram.enums import ChatType
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DEST_CHANNEL = int(os.getenv("-1003641237296", 0)) 
+DEST_CHANNEL = int(os.getenv("DEST_CHANNEL", 0)) 
 
 OWNER_ID = 5344078567                    
 ALLOWED_USERS = [5351848105]             
-ALLOWED_CHANNEL = [-1003641237296]        
+ALLOWED_GROUPS = [-1003810374456]        
 
 app = Client("EncoderBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -210,5 +210,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.get_event_loop().run_until_complete(main())
-
     
