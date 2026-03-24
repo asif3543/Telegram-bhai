@@ -46,7 +46,6 @@ def progress_bar(percent):
     return "█" * filled + "░" * (12 - filled)
 
 def get_duration(file):
-    """FIXED: Handles 'N/A' errors to prevent crash"""
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", file],
@@ -97,37 +96,25 @@ async def cancel_handler(client, message: Message):
 async def delete_handler(client, message: Message):
     if not is_authorized(message): return
     global users, active_process, task_queue, current_user, current_task, in_queue
-    
-    # Cancel current task if it exists
-    if current_task: 
-        current_task.cancel()
-    
-    # Kill any active ffmpeg processes
+    if current_task: current_task.cancel()
     for uid, process in active_process.items():
-        try:
-            process.kill()
-        except:
-            pass
-            
-    # Clear all global data structures
+        try: process.kill()
+        except: pass
     users.clear()
     active_process.clear()
     task_queue.clear()
     in_queue.clear()
     current_user = None
     current_task = None
-    
     await message.reply("🗑️ <b>All old data, queues, and active tasks have been successfully deleted!</b>")
 
 @app.on_message(filters.video | filters.document)
 async def file_handler(client, message: Message):
     if not is_authorized(message): return
     user_id = message.from_user.id    
-    
     if message.document and message.document.file_name.lower().endswith((".srt", ".ass", ".vtt")):
         if user_id not in users or "video" not in users[user_id]:
             return await message.reply("❌ Send /hsub on a video first.")
-        
         users[user_id]["subtitle"] = {"file_id": message.document.file_id, "file_name": message.document.file_name}
         task_queue.append({'user_id': user_id, 'message': message, 'video_info': users[user_id]["video"], 'subtitle_info': users[user_id]["subtitle"]})
         in_queue.add(user_id)
@@ -138,7 +125,7 @@ async def file_handler(client, message: Message):
         users[user_id] = {"video": {"file_id": media.file_id, "file_name": getattr(media, 'file_name', "video.mp4")}}
         await message.reply("📄 Now send the Subtitle file.")
 
-# ================= CORE LOGIC =================
+# ================= CORE LOGIC (FASTEST SETTINGS) =================
 
 async def generate_thumbnail(video_path, user_id):
     try:
@@ -152,12 +139,22 @@ async def generate_thumbnail(video_path, user_id):
     except: return None
 
 async def encode_video(user_id, video_path, sub_path, output_path, duration, msg):
-    # FIXED: Subtitle path escaping for Linux (Railway)
+    # Railway/Linux compatibility ke liye escaping
     sub_path_es = sub_path.replace("'", "'\\''").replace(":", "\\:")
+    
     cmd = [
-        "ffmpeg", "-i", video_path, "-vf", f"subtitles='{sub_path_es}'", 
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", 
-        "-c:a", "copy", "-progress", "pipe:1", "-nostats", "-y", output_path
+        "ffmpeg", "-i", video_path, 
+        "-vf", f"subtitles='{sub_path_es}'", 
+        "-c:v", "libx264", 
+        "-preset", "ultrafast",  # Fastest encoding speed
+        "-crf", "22",            # Good balance of size and quality
+        "-threads", "0",         # Auto-optimize for Railway CPU
+        "-c:a", "copy",          # Direct audio copy (Zero processing time)
+        "-map", "0:v",           # Video stream copy
+        "-map", "0:a",           # Audio stream copy
+        "-progress", "pipe:1", 
+        "-nostats", "-y", 
+        output_path
     ]
     
     process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
@@ -186,14 +183,11 @@ async def encode_video(user_id, video_path, sub_path, output_path, duration, msg
 async def process_encoding(client, message, user_id, video_info, subtitle_info):
     status = await message.reply("⚙️ Downloading files...")
     v_path = s_path = output = thumb = None
-    
     try:
         v_path = await client.download_media(video_info["file_id"], file_name=video_info["file_name"])
         s_path = await client.download_media(subtitle_info["file_id"], file_name=subtitle_info["file_name"])
-        
         output = f"Encoded_{video_info['file_name']}"
         duration = get_duration(v_path)
-        
         await status.edit("🔥 <b>Encoding started...</b>")
         if await encode_video(user_id, v_path, s_path, output, duration, status):
             thumb = await generate_thumbnail(output, user_id)
@@ -207,7 +201,7 @@ async def process_encoding(client, message, user_id, video_info, subtitle_info):
             )
             await status.edit("✅ <b>Success! Sent to channel.</b>")
         else:
-            await status.edit("❌ <b>Error: File size equals to 0 B.</b> (Check Subtitle format)")
+            await status.edit("❌ <b>Error: Process failed.</b> Check subtitle format.")
     except Exception as e:
         await status.edit(f"❌ <b>Error:</b> {str(e)}")
     finally:
@@ -223,14 +217,11 @@ async def queue_worker():
             task = task_queue.popleft()
             current_user = task['user_id']
             in_queue.remove(current_user)
-        
         try:
             current_task = asyncio.create_task(process_encoding(app, task['message'], current_user, task['video_info'], task['subtitle_info']))
             await current_task
-        except asyncio.CancelledError:
-            pass # Ignore if task was cancelled by /delete
-        finally:
-            current_user = None
+        except asyncio.CancelledError: pass
+        finally: current_user = None
 
 async def main():
     await app.start()
