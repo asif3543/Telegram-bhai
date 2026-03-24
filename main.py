@@ -93,6 +93,32 @@ async def cancel_handler(client, message: Message):
     else:
         await message.reply("❌ Nothing to cancel.")
 
+@app.on_message(filters.command("delete"))
+async def delete_handler(client, message: Message):
+    if not is_authorized(message): return
+    global users, active_process, task_queue, current_user, current_task, in_queue
+    
+    # Cancel current task if it exists
+    if current_task: 
+        current_task.cancel()
+    
+    # Kill any active ffmpeg processes
+    for uid, process in active_process.items():
+        try:
+            process.kill()
+        except:
+            pass
+            
+    # Clear all global data structures
+    users.clear()
+    active_process.clear()
+    task_queue.clear()
+    in_queue.clear()
+    current_user = None
+    current_task = None
+    
+    await message.reply("🗑️ <b>All old data, queues, and active tasks have been successfully deleted!</b>")
+
 @app.on_message(filters.video | filters.document)
 async def file_handler(client, message: Message):
     if not is_authorized(message): return
@@ -198,9 +224,13 @@ async def queue_worker():
             current_user = task['user_id']
             in_queue.remove(current_user)
         
-        current_task = asyncio.create_task(process_encoding(app, task['message'], current_user, task['video_info'], task['subtitle_info']))
-        await current_task
-        current_user = None
+        try:
+            current_task = asyncio.create_task(process_encoding(app, task['message'], current_user, task['video_info'], task['subtitle_info']))
+            await current_task
+        except asyncio.CancelledError:
+            pass # Ignore if task was cancelled by /delete
+        finally:
+            current_user = None
 
 async def main():
     await app.start()
@@ -210,4 +240,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.get_event_loop().run_until_complete(main())
-    
