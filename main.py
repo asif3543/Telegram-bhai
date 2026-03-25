@@ -82,9 +82,7 @@ async def cancel_handler(client, message: Message):
     user_id = message.from_user.id
     if user_id == current_user:
         if current_task: current_task.cancel()
-        if user_id in active_process: 
-            try: active_process[user_id].kill()
-            except: pass
+        if user_id in active_process: active_process[user_id].kill()
         await message.reply("❌ Current encoding cancelled.")
     elif user_id in in_queue:
         global task_queue
@@ -127,7 +125,7 @@ async def file_handler(client, message: Message):
         users[user_id] = {"video": {"file_id": media.file_id, "file_name": getattr(media, 'file_name', "video.mp4")}}
         await message.reply("📄 Now send the Subtitle file.")
 
-# ================= CORE LOGIC (QUALITY & SIZE PRESERVED) =================
+# ================= CORE LOGIC (FASTEST SETTINGS) =================
 
 async def generate_thumbnail(video_path, user_id):
     try:
@@ -141,21 +139,19 @@ async def generate_thumbnail(video_path, user_id):
     except: return None
 
 async def encode_video(user_id, video_path, sub_path, output_path, duration, msg):
-    # Railway/Linux compatibility ke liye subtitle path escape
+    # Railway/Linux compatibility ke liye escaping
     sub_path_es = sub_path.replace("'", "'\\''").replace(":", "\\:")
     
     cmd = [
         "ffmpeg", "-i", video_path, 
         "-vf", f"subtitles='{sub_path_es}'", 
         "-c:v", "libx264", 
-        "-preset", "fast",       # Size control karne ke liye 'fast' best hai
-        "-crf", "23",            # '23' is standard for high quality and small size
-        "-pix_fmt", "yuv420p",   # Compatibility with all players
-        "-threads", "0", 
-        "-c:a", "copy",          # Audio copy takki original quality rahe
-        "-map", "0:v:0", 
-        "-map", "0:a:0?",        # Pehla audio stream select karega
-        "-sn",                   # Extra soft-subs hata dega
+        "-preset", "ultrafast",  # Fastest encoding speed
+        "-crf", "24",            # Good balance of size and quality
+        "-threads", "0",         # Auto-optimize for Railway CPU
+        "-c:a", "copy",          # Direct audio copy (Zero processing time)
+        "-map", "0:v",           # Video stream copy
+        "-map", "0:a",           # Audio stream copy
         "-progress", "pipe:1", 
         "-nostats", "-y", 
         output_path
@@ -177,7 +173,7 @@ async def encode_video(user_id, video_path, sub_path, output_path, duration, msg
                     percent = min(int((current_time / duration) * 100), 100)
                     if time.time() - last_update >= 10:
                         bar = progress_bar(percent)
-                        await msg.edit(f"<b>🔥 Encoding:</b> {percent}%\n{bar}\n\n<i>Maintain Resolution & Quality...</i>")
+                        await msg.edit(f"<b>🔥 Encoding:</b> {percent}%\n{bar}")
                         last_update = time.time()
             except: continue
     
@@ -192,7 +188,7 @@ async def process_encoding(client, message, user_id, video_info, subtitle_info):
         s_path = await client.download_media(subtitle_info["file_id"], file_name=subtitle_info["file_name"])
         output = f"Encoded_{video_info['file_name']}"
         duration = get_duration(v_path)
-        await status.edit("🔥 <b>Encoding started...</b>\n<i>Quality: Original Resolution</i>")
+        await status.edit("🔥 <b>Encoding started...</b>")
         if await encode_video(user_id, v_path, s_path, output, duration, status):
             thumb = await generate_thumbnail(output, user_id)
             await status.edit("📤 <b>Uploading to Channel...</b>")
@@ -205,7 +201,7 @@ async def process_encoding(client, message, user_id, video_info, subtitle_info):
             )
             await status.edit("✅ <b>Success! Sent to channel.</b>")
         else:
-            await status.edit("❌ <b>Error: Process failed.</b>")
+            await status.edit("❌ <b>Error: Process failed.</b> Check subtitle format.")
     except Exception as e:
         await status.edit(f"❌ <b>Error:</b> {str(e)}")
     finally:
