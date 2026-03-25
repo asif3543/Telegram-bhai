@@ -147,7 +147,7 @@ async def encode_video(user_id, video_path, sub_path, output_path, duration, msg
         "-vf", f"subtitles='{sub_path_es}'", 
         "-c:v", "libx264", 
         "-preset", "ultrafast",  # Fastest encoding speed
-        "-crf", "26",            # Good balance of size and quality
+        "-crf", "24",            # Good balance of size and quality
         "-threads", "0",         # Auto-optimize for Railway CPU
         "-c:a", "copy",          # Direct audio copy (Zero processing time)
         "-map", "0:v",           # Video stream copy
