@@ -154,7 +154,7 @@ async def encode_with_progress(video_path, subtitle_path, output_path, total_dur
                     # [4] PROGRESS UPDATE CHANGED FROM 7 TO 5 SECONDS
                     if now - last_update > 5 or percent >= 100:
                         bar = format_progress_bar(percent)
-                        await safe_edit(status_msg, f"🔥 Encoding...\n`{bar}` {percent:.1f}%")
+                        await safe_edit(status_msg, f"🔥🤗 Encoding...\n`{bar}` {percent:.1f}%")
                         last_update = now
                 except Exception:
                     pass
